@@ -1,18 +1,17 @@
-# File: src/rrt/rrt_node.py
-
 import numpy as np
-import scipy.ndimage as nd
 import math
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import rclpy
-#import tf_transformations
-from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import PoseArray, Pose, Point, Quaternion
-from sensor_msgs.msg import Range
-from visualization_msgs.msg import Marker 
-from nav_msgs.msg import Odometry, OccupancyGrid
+from rclpy.node import Node, Publisher
+from geometry_msgs.msg import Pose, Point
+from visualization_msgs.msg import Marker, MarkerArray
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Float64MultiArray, ColorRGBA
+
+RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+GREEN = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+BLUE = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)
 
 class CameraNode(Node):
     def __init__(self):
@@ -23,15 +22,17 @@ class CameraNode(Node):
         pose_topic = "ego_racecar/odom"
         leftwall_ranges_topic = "/left_wall_ranges"
         rightwall_ranges_topic = "/right_wall_ranges"
-        occupancy_grid_topic = "/rrt_occupancy_grid"
+        left_marker_point_topic = "/left_wall_marker_points"
+        right_marker_point_topic = "/right_wall_marker_points"
+        left_marker_range_topic = "/left_wall_marker_ranges"
+        right_marker_range_topic = "/right_wall_marker_ranges"
 
         # Parameters
-        self.map_width = 70
-        self.map_height = 120
-        self.grid_resolution = 0.025  # Grid cell size in meters
-        self.lookahead_distance = 1.5
-        self.car_length = 0.35  
-        self.car_width = 0.20
+        self.fov = 70 # in degrees
+        self.car_length = 0.35 # in meters
+        self.car_width = 0.20 # in meters
+        self.cone_diameter = 0.25 # in meters
+        self.frame_id = "map"
 
         # Current location
         self.x = None
@@ -42,19 +43,8 @@ class CameraNode(Node):
         self.create_subscription(Odometry, pose_topic, self.pose_callback, 10)
 
         # Publishers (#Keeping for now but we will have to change Rviz visuals)
-        self.grid_pub = self.create_publisher(OccupancyGrid, occupancy_grid_topic, 10)
-        self.goal_pub = self.create_publisher(Marker, "/curr_wallpoint", 10) 
-        self.left_wall_publisher = self.create_publisher(PoseArray, leftwall_ranges_topic, 10) 
-        self.right_wall_publisher = self.create_publisher(PoseArray, rightwall_ranges_topic, 10) 
-
-        # Class attributes
-        self.occupancy_grid = None
-        self.start = None
-        self.goal = None
-
-        # Precompute kernel
-        d = int(2 * (self.car_width / self.grid_resolution))
-        self.kernel = np.fromfunction(lambda x, y: ((x+.5-d/2)**2 + (y+.5-d/2)**2 < (d/2)**2)*1, shape=(d, d), dtype=int)
+        self.left_wall_publisher = self.create_publisher(Float64MultiArray, leftwall_ranges_topic, 10) 
+        self.right_wall_publisher = self.create_publisher(Float64MultiArray, rightwall_ranges_topic, 10) 
 
         # Load wallpoints from file
         self.left_wall = []
@@ -63,154 +53,115 @@ class CameraNode(Node):
         self.right_wall_path = "./src/cone_detection/config/right_wall.csv"  # Path to waypoints
         self.load_wallpoints()
 
-        #not sure this works yet
-        #self.publish_points(self.goals, self.goal_array_pub)
+        # Visualization publishers for RViz
+        self.left_marker_point_pub = self.create_publisher(MarkerArray, left_marker_point_topic, 10)
+        self.right_marker_point_pub = self.create_publisher(MarkerArray, right_marker_point_topic, 10)
+        self.left_marker_range_pub = self.create_publisher(MarkerArray, left_marker_range_topic, 10)
+        self.last_left_wallranges_len = 0
+        self.right_marker_range_pub = self.create_publisher(MarkerArray, right_marker_range_topic, 10)
+        self.last_right_wallranges_len = 0
+        self.border_pub = self.create_publisher(MarkerArray, '/border', 10)
 
-
-    #
-    # Pose callback is used to update the car's position and find the closest walls in range
-    # This will run on callback and always be updated whenever the car's position changes
-    #
     def pose_callback(self, pose_msg: Odometry):
+        self.publish_wallpoints(self.left_wall, "left_wall", RED, self.left_marker_point_pub)
+        self.publish_wallpoints(self.right_wall, "right_wall", BLUE, self.right_marker_point_pub)
 
-        # Return if occupancy grid doesnt exist yet
-        if self.occupancy_grid is None:
-            return
-        
+        # get current position
         current_pose = pose_msg.pose.pose
         self.x = current_pose.position.x
         self.y = current_pose.position.y
         self.yaw = self.get_yaw_from_pose(current_pose)
 
-        # Calculate the offset in the car's frame
-        half_grid_height = self.map_height * self.grid_resolution / 2
-        offset_x = half_grid_height * math.sin(self.yaw)
-        offset_y = -half_grid_height * math.cos(self.yaw)
+        # Compute cones for both sides with distances
+        left_cones = self.cones_in_fov(self.left_wall) 
+        right_cones = self.cones_in_fov(self.right_wall)
 
-        # Update the grid origin position and orientation in the global frame. This is for Rviz visualization
-        self.occupancy_grid.info.origin.position.x = self.x + offset_x
-        self.occupancy_grid.info.origin.position.y = self.y + offset_y
+        # Tag them to know which side they belong to
+        cones = [("L", *c) for c in left_cones] + [("R", *c) for c in right_cones]
 
-        self.occupancy_grid.info.origin.orientation.w = np.cos(self.yaw / 2)
-        self.occupancy_grid.info.origin.orientation.z = np.sin(self.yaw / 2)
-        self.occupancy_grid.info.origin.orientation.x = 0.0
-        self.occupancy_grid.info.origin.orientation.y = 0.0
+        # Remove overlaps between left and right sets
+        indices_to_remove = set()
+        for i in range(len(cones)):
+            if i in indices_to_remove:
+                continue
+            for j in range(i+1, len(cones)):
+                if j in indices_to_remove:
+                    continue
 
-        # Publish update
-        self.grid_pub.publish(self.occupancy_grid)
+                _, t1_start, t1_end, d1 = cones[i]
+                _, t2_start, t2_end, d2 = cones[j]
 
-        # Setup the goal waypoints to be relative to car frame, then find the closest one ahead
-        transformed_left_waypoints = self.transform_wallpoints_to_car_frame(current_pose, self.yaw, self.left_wall)
-        transformed_right_waypoints = self.transform_wallpoints_to_car_frame(current_pose, self.yaw, self.right_wall)
+                # Check for overlap
+                if not (t1_end < t2_start or t2_end < t1_start):
+                    if d1 > d2:
+                        indices_to_remove.add(i)
+                    else:
+                        indices_to_remove.add(j)
 
+        filtered_cones = []
+        for idx, (side, tstart, tend, _) in enumerate(cones):
+            if idx not in indices_to_remove:
+                filtered_cones.append((side, tstart, tend))
 
-        lookahead_waypoints_left = self.find_lookahead_waypoints(transformed_left_waypoints, self.lookahead_distance) 
-        lookahead_waypoints_right = self.find_lookahead_waypoints(transformed_right_waypoints, self.lookahead_distance)
+        # Separate back into left and right
+        final_left_cones = [(tstart, tend) for (side, tstart, tend) in filtered_cones if side == "L"]
+        final_right_cones = [(tstart, tend) for (side, tstart, tend) in filtered_cones if side == "R"]
 
-        if lookahead_waypoints_left:
-            left_wallpoints_pub = []
-            for wp in lookahead_waypoints_left:
+        leftWallArray = Float64MultiArray()
+        leftWallArray.data = []
+        for theta_start, theta_end in final_left_cones:
+            leftWallArray.data.extend([theta_start, theta_end])
 
-                # Convert the lookahead waypoint back to the global frame for path planning
-                lookahead_x = self.x + (
-                    wp.x * math.cos(self.yaw) - wp.y * math.sin(self.yaw)
-                )
-                lookahead_y = self.y + (
-                    wp.x * math.sin(self.yaw) + wp.y * math.cos(self.yaw)
-                )
-                distance = np.sqrt((lookahead_x - self.x)**2 + (lookahead_y - self.y)**2)
-                fov = 0.5
-                color = 0
-
-                # Create Range message
-                range_msg = Range()
-                range_msg.header.stamp = self.get_clock().now().to_msg()
-                range_msg.header.frame_id = "left_wall_ranges"
-                range_msg.radiation_type = 0 #0 for left wall 1 for right
-                range_msg.field_of_view = fov
-                range_msg.min_range = 0.0
-                range_msg.max_range = 0.0
-                range_msg.range = distance
-
-                left_wallpoints_pub.append(range_msg)
-                #create Range message
-
-                # Publish the goal pose for visualization
-            self.publish_wall(left_wallpoints_pub, self.left_wall_publisher)
+        # Publish the left wall
+        self.left_wall_publisher.publish(leftWallArray)
+        self.last_left_wallranges_len = self.publish_wallranges(leftWallArray.data, self.last_left_wallranges_len, "left_ranges", RED, self.left_marker_range_pub)
         
+        rightWallArray = Float64MultiArray()
+        rightWallArray.data = []
+        for theta_start, theta_end in final_right_cones:
+            rightWallArray.data.extend([theta_start, theta_end])
 
-        if lookahead_waypoints_right:
-            right_wallpoints_pub = []
-            for wp in lookahead_waypoints_right:
+        # Publish the right wall
+        self.right_wall_publisher.publish(rightWallArray)
+        self.last_right_wallranges_len = self.publish_wallranges(rightWallArray.data, self.last_right_wallranges_len, "right_ranges", BLUE, self.right_marker_range_pub)
 
-                # Convert the lookahead waypoint back to the global frame for path planning
-                lookahead_x = self.x + (
-                    wp.x * math.cos(self.yaw) - wp.y * math.sin(self.yaw)
-                )
-                lookahead_y = self.y + (
-                    wp.x * math.sin(self.yaw) + wp.y * math.cos(self.yaw)
-                )
-                distance = np.sqrt((lookahead_x - self.x)**2 + (lookahead_y - self.y)**2)
-                fov = 0.5
-                color = 0
+        # Publish border
+        self.publish_wallranges([0.610865, -0.610865], 2, "border", GREEN, self.border_pub)
 
-                # Create Range message
-                range_msg = Range()
-                range_msg.header.stamp = self.get_clock().now().to_msg()
-                range_msg.header.frame_id = "right_wall_ranges"
-                range_msg.radiation_type = 1 #0 for left wall 1 for right
-                range_msg.field_of_view = fov
-                range_msg.min_range = 0.0
-                range_msg.max_range = 0.0
-                range_msg.range = distance
+    def cones_in_fov(self, waypoints: List[Point]) -> List[Tuple]:
+        fov_radians = math.radians(self.fov)
+        half_fov = fov_radians / 2.0
 
-                right_wallpoints_pub.append(range_msg)
-                #create Range message
-
-                # Publish the goal pose for visualization
-            self.publish_wall(right_wallpoints_pub, self.right_wall_publisher)
-
-                
-    def transform_wallpoints_to_car_frame(self, current_pose: Pose, heading: float, wallpoints):
-        transformed_wallpoints = []
-        for wallpoint in wallpoints:
-            dx = wallpoint.x - current_pose.position.x
-            dy = wallpoint.y - current_pose.position.y
-            transformed_x = dx * np.cos(-heading) - dy * np.sin(-heading)
-            transformed_y = dx * np.sin(-heading) + dy * np.cos(-heading)
-            transformed_wallpoints.append(Point(x=transformed_x, y=transformed_y))
-        return transformed_wallpoints
-
-    def find_lookahead_waypoints(self, transformed_waypoints: List[Point], lookahead_distance: float) -> Optional[Point]:
-        valid_waypoints = []
-
-        for wp in transformed_waypoints:
-            # Ensure waypoint is ahead of the vehicle (positive x in vehicle frame)
-            dist_to_wp = np.sqrt((wp.x)**2 + (wp.y)**2)
-            if wp.x <= 0 or dist_to_wp < lookahead_distance:
+        cones_in_view_ranges = []
+        for point in waypoints:
+            # Compute vector from robot to point
+            dx = point.x - self.x
+            dy = point.y - self.y
+            if dx == 0 and dy == 0:
                 continue
 
-            # Ensure the waypoint is not in a wall
-            wp_grid_x = int(wp.x / self.grid_resolution)
-            wp_grid_y = int(wp.y / self.grid_resolution) + self.map_height // 2
-            if self.check_around_point(wp_grid_x, wp_grid_y, 3):
-                continue
+            # find angle from point
+            point_angle = math.atan2(dy, dx)
+            angle_diff = point_angle - self.yaw
+            angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
 
-            # Add waypoint to the valid list
-            valid_waypoints.append(wp)
+            # Check angle difference is in fov
+            if -half_fov <= angle_diff <= half_fov:
+                distance = math.sqrt(dx**2 + dy**2)
+                if distance == 0:
+                    continue
 
-        return valid_waypoints
+                # Half-angle that the cone subtends
+                half_angle = math.atan2((self.cone_diameter / 2.0), distance)
 
-    def check_around_point(self, x: int, y: int, rad: int) -> bool:
-        for dy in range(-rad, rad + 1):
-                for dx in range(-rad, rad + 1):
-                    nx, ny = x + dx, y + dy
-                    
-                    # Check boundaries
-                    point_idx = int(ny * self.map_width + nx)
-                    if 0 <= nx < self.map_width and 0 <= ny < self.map_height and self.occupancy_grid.data[point_idx] > 0:
-                        return True
-        return False
+                theta_start = angle_diff - half_angle
+                theta_end = angle_diff + half_angle
+                theta_start = (theta_start + math.pi) % (2 * math.pi) - math.pi
+                theta_end = (theta_end + math.pi) % (2 * math.pi) - math.pi
+
+                cones_in_view_ranges.append((theta_start, theta_end, distance))
+
+        return cones_in_view_ranges
 
     def get_yaw_from_pose(self, pose: Pose) -> float:
         orientation = pose.orientation
@@ -233,48 +184,97 @@ class CameraNode(Node):
         except FileNotFoundError:
             self.get_logger().warn("Waypoints file not found.")
 
-    def publish_wall(self, wallpoints_pub: List[Range], publisher):
-        """
-        Publish a list of Range messages to the specified publisher.
+    def publish_wallranges(self, rangeArray: List[float], last_len: int, namespace: str, color: ColorRGBA, publisher: Publisher) -> int:
+        wallranges_markers = MarkerArray()
 
-        Args:
-            wallpoints_pub (List[Range]): List of Range messages to publish.
-            publisher: The ROS2 publisher to send the messages.
-        """
-        for range_msg in wallpoints_pub:
-            publisher.publish(range_msg)
-        self.get_logger().info(f"Published {len(wallpoints_pub)} range messages to {publisher.topic_name}.")
+        for i, angle in enumerate(rangeArray):
+            marker = self.angle_to_arrow(self.yaw + angle, i, namespace, color)
 
+            wallranges_markers.markers.append(marker)
 
-    # Publishes the goal poses as a PoseArray message to a new topic for visualization in RViz
-    def publish_points(self, points: List[Point], publisher):
-        point_array = PoseArray()
-       
-        for i in range(len(points)):
-            if i < len(points) - 1:
-                p1, p2 = points[i], points[i+1]
-            else:
-                p1, p2 = points[i], points[i]
-            pose = Pose()
-            pose.position.x = p1.x
-            pose.position.y = p1.y
-            pose.position.z = 0.0
+        # Delete old
+        curr_wallranges_len = len(wallranges_markers.markers)
+        if (curr_wallranges_len < last_len):
+            for i in range(curr_wallranges_len, last_len):
+                marker = self.remove_marker(i, namespace)
 
-            # Calculate yaw (heading)
-            yaw = math.atan2(p2.y - p1.y, p2.x - p1.x)
+                wallranges_markers.markers.append(marker)
 
-            # Calculate quaternion
-            #quaternion = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
-            pose.orientation = Quaternion(
-                w=quaternion[0],
-                x=quaternion[1],
-                y=quaternion[2],
-                z=quaternion[3],
-            )
-            
-            point_array.poses.append(pose)
-       
-        publisher.publish(point_array)
+        # Publish the markers
+        publisher.publish(wallranges_markers)
+        return curr_wallranges_len
+
+    def publish_wallpoints(self, points: List[Point], namespace: str, color: ColorRGBA, publisher: Publisher):
+        wallpoints_markers = MarkerArray()
+
+        for i, point in enumerate(points):
+            marker = self.point_to_marker(point, i, namespace, color)
+
+            wallpoints_markers.markers.append(marker)
+
+        # Publish the markers
+        publisher.publish(wallpoints_markers)
+
+    def angle_to_arrow(self, angle: float, idx: int, namespace: str, color: ColorRGBA) -> Marker:
+        # Create and publish a marker for this direction angle
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = idx
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+
+        # tail at current position
+        marker.points.append(Point(x=self.x, y=self.y, z=0.0))
+
+        # Set arrow length
+        arrow_length = 10.0
+        end_x = self.x + arrow_length * math.cos(angle)
+        end_y = self.y + arrow_length * math.sin(angle)
+        marker.points.append(Point(x=end_x, y=end_y, z=0.0))
+
+        # Set the marker size and color
+        marker.scale.x = 0.05
+        marker.scale.y = 0.1
+        marker.scale.z = 0.1
+        marker.color = color
+
+        return marker
+
+    def point_to_marker(self, point: Point, idx: int, namespace: str, color: ColorRGBA) -> Marker:
+        # Create and publish a marker for this point
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = idx
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = point.x
+        marker.pose.position.y = point.y
+        marker.pose.position.z = point.z
+        marker.pose.orientation.w = 1.0
+
+        # Set the marker size and color
+        marker.scale.x = 0.1
+        marker.scale.y = 0.1
+        marker.scale.z = 0.1
+        marker.color = color
+
+        return marker
+    
+    def remove_marker(self, idx: int, namespace: str) -> Marker:
+        # Create and publish a marker for this point
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = namespace
+        marker.id = idx
+        marker.type = Marker.ARROW
+        marker.action = Marker.DELETE
+
+        return marker
 
        
 def main(args=None):
@@ -287,5 +287,5 @@ def main(args=None):
     rclpy.shutdown()
 
 
-if __name__ == "__main__":#Keeping for now but we will have to change Rviz visuals
+if __name__ == "__main__":
     main()

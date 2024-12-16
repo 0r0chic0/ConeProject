@@ -23,4 +23,10 @@ def generate_launch_description():
             name='camera_node',
             parameters=[config]
         ),
+        # Node(
+        #     package='cone_detection',
+        #     executable='waypoint_node',
+        #     name='waypoints',
+        #     parameters=[config]
+        # )
     ])
