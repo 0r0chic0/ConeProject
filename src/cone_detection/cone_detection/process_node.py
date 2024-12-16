@@ -1,5 +1,4 @@
 import numpy as np
-import math
 from typing import List
 
 import rclpy
@@ -35,6 +34,7 @@ class ProcessNode(Node):
         self.cone_diameter = 0.25 # in meters
         self.merge_point_threshold = 0.25 # in meters
         self.frame_id = "map"
+        self.log = True
 
         # Subscribers
         self.create_subscription(Float64MultiArray, leftwall_ranges_topic, self.leftwall_callback, 10) 
@@ -44,12 +44,6 @@ class ProcessNode(Node):
 
         # Publishers
         self.waypoint_pub = self.create_publisher(PoseArray, waypoints_topic, 10)
-        self.waypoint_viz_pub = self.create_publisher(MarkerArray, waypoint_viz_topic, 10)
-        self.last_waypoint_len = 0
-        self.leftwall_markers_pub = self.create_publisher(MarkerArray, leftwall_markers_topic, 10)
-        self.last_leftwall_markers_len = 0
-        self.rightwall_markers_pub = self.create_publisher(MarkerArray, rightwall_markers_topic, 10)
-        self.last_rightwall_markers_len = 0
 
         # Persistant state
         self.left_wall: List[Point] = []
@@ -63,6 +57,15 @@ class ProcessNode(Node):
         self.x = None
         self.y = None
         self.yaw = None
+
+        # Visualization publishers for RViz
+        if self.log:
+            self.waypoint_viz_pub = self.create_publisher(MarkerArray, waypoint_viz_topic, 10)
+            self.last_waypoint_len = 0
+            self.leftwall_markers_pub = self.create_publisher(MarkerArray, leftwall_markers_topic, 10)
+            self.last_leftwall_markers_len = 0
+            self.rightwall_markers_pub = self.create_publisher(MarkerArray, rightwall_markers_topic, 10)
+            self.last_rightwall_markers_len = 0
 
     def pose_callback(self, pose_msg: Odometry):
         # get current position
@@ -78,15 +81,18 @@ class ProcessNode(Node):
     def leftwall_callback(self, wall_msg: Float64MultiArray):
         new_points = self.get_points_from_ranges(wall_msg.data)
         self.left_wall = self.merge_points(self.left_wall, new_points, self.merge_point_threshold)
-        self.last_leftwall_markers_len = self.publish_waypoint_viz(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
 
+        if self.log:
+            self.last_leftwall_markers_len = self.publish_waypoint_viz(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
 
         self.recalculate_midpoints()
 
     def rightwall_callback(self, wall_msg: Float64MultiArray):
         new_points = self.get_points_from_ranges(wall_msg.data)
         self.right_wall = self.merge_points(self.right_wall, new_points, self.merge_point_threshold)
-        self.last_rightwall_markers_len = self.publish_waypoint_viz(self.right_wall, self.last_rightwall_markers_len, "rightwall_markers", BLUE, self.rightwall_markers_pub)
+
+        if self.log:
+            self.last_rightwall_markers_len = self.publish_waypoint_viz(self.right_wall, self.last_rightwall_markers_len, "rightwall_markers", BLUE, self.rightwall_markers_pub)
 
         self.recalculate_midpoints()
 
@@ -94,29 +100,43 @@ class ProcessNode(Node):
         midpoint_poses = PoseArray()
 
         # For each point in the left wall and each point in the right wall, find the midpoint
-        for lp in self.left_wall:
-            if self.dist_from_self(lp) > 7:
+        for rp in self.right_wall:
+            if self.dist_from_self(rp) > 6:
                 continue
 
-            for rp in self.right_wall:
-                if self.dist_from_self(rp) > 7:
+            # Find closest
+            closest = None
+            closest_dist = np.inf
+            for lp in self.left_wall:
+                if self.dist_from_self(lp) > 6:
                     continue
 
-                mx = (lp.x + rp.x) / 2.0
-                my = (lp.y + rp.y) / 2.0
-                
+                dx = lp.x - rp.x
+                dy = lp.y - rp.y
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance < closest_dist:
+                    closest = lp
+                    closest_dist = distance
 
-                # Add point at midpoint
-                pose = Pose()
-                pose.position.x = mx
-                pose.position.y = my
-                pose.position.z = 0.0
-                pose.orientation.w = 1.0
-                midpoint_poses.poses.append(pose)
+            if closest is None:
+                continue
+
+            mx = (rp.x + closest.x) / 2.0
+            my = (rp.y + closest.y) / 2.0
+
+            # Add point at midpoint
+            pose = Pose()
+            pose.position.x = mx
+            pose.position.y = my
+            pose.position.z = 0.0
+            pose.orientation.w = 1.0
+            midpoint_poses.poses.append(pose)
 
         # Publish to pure pursuit
         self.waypoint_pub.publish(midpoint_poses)
-        self.last_waypoint_len = self.publish_waypoint_viz([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
+
+        if self.log:
+            self.last_waypoint_len = self.publish_waypoint_viz([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
 
     def merge_points(self, existing_points: List[Point], new_points: List[Point], threshold: float) -> List[Point]:
         # for new in new_points:
@@ -124,7 +144,7 @@ class ProcessNode(Node):
         #     for _, existing in enumerate(existing_points):
         #         dx = existing.x - new.x
         #         dy = existing.y - new.y
-        #         dist = math.sqrt(dx*dx + dy*dy)
+        #         dist = np.sqrt(dx**2 + dy**2)
         #         if dist < threshold:
         #             # merge points
         #             existing.x = (existing.x + new.x) / 2.0
@@ -135,6 +155,9 @@ class ProcessNode(Node):
         #     if not merged:
         #         # if no match, add in
         #         existing_points.append(new)
+
+        if len(new_points) == 0:
+            return existing_points
         
         return new_points
 
@@ -168,12 +191,14 @@ class ProcessNode(Node):
             # find average distance, rejecting outliers
             avg_dist = np.mean(valid_values[abs(valid_values - np.mean(valid_values)) < 1 * np.std(valid_values)]) + self.cone_diameter / 2
             theta_mid = (theta_start + theta_end) / 2.0
-            # self.get_logger().info(f"{np.mean(valid_values)}, {np.std(valid_values)} {segment} {avg_dist}")
+
+            if avg_dist > 6:
+                continue
 
             # get global coords and store
             global_angle = self.yaw + theta_mid
-            x_g = self.x + avg_dist * math.cos(global_angle)
-            y_g = self.y + avg_dist * math.sin(global_angle)
+            x_g = self.x + avg_dist * np.cos(global_angle)
+            y_g = self.y + avg_dist * np.sin(global_angle)
             p = Point(x=x_g, y=y_g, z=0.0)
             points.append(p)
 

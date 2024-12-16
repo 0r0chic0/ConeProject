@@ -1,5 +1,4 @@
 import numpy as np
-import math
 from typing import List, Tuple
 
 import rclpy
@@ -31,8 +30,11 @@ class CameraNode(Node):
         self.car_length = 0.35 # in meters
         self.car_width = 0.20 # in meters
         self.fov = 70 # in degrees
+        self.fov_radians = np.radians(self.fov)
+        self.half_fov = self.fov_radians / 2.0
         self.cone_diameter = 0.30 # in meters
         self.frame_id = "map"
+        self.log = True
 
         # Current location
         self.x = None
@@ -54,17 +56,19 @@ class CameraNode(Node):
         self.load_wallpoints()
 
         # Visualization publishers for RViz
-        self.left_marker_point_pub = self.create_publisher(MarkerArray, left_marker_point_topic, 10)
-        self.right_marker_point_pub = self.create_publisher(MarkerArray, right_marker_point_topic, 10)
-        self.left_marker_range_pub = self.create_publisher(MarkerArray, left_marker_range_topic, 10)
-        self.last_left_wallranges_len = 0
-        self.right_marker_range_pub = self.create_publisher(MarkerArray, right_marker_range_topic, 10)
-        self.last_right_wallranges_len = 0
-        self.border_pub = self.create_publisher(MarkerArray, '/border', 10)
+        if self.log:
+            self.left_marker_point_pub = self.create_publisher(MarkerArray, left_marker_point_topic, 10)
+            self.right_marker_point_pub = self.create_publisher(MarkerArray, right_marker_point_topic, 10)
+            self.left_marker_range_pub = self.create_publisher(MarkerArray, left_marker_range_topic, 10)
+            self.last_left_wallranges_len = 0
+            self.right_marker_range_pub = self.create_publisher(MarkerArray, right_marker_range_topic, 10)
+            self.last_right_wallranges_len = 0
+            self.border_pub = self.create_publisher(MarkerArray, '/border', 10)
 
     def pose_callback(self, pose_msg: Odometry):
-        self.publish_wallpoints(self.left_wall, "left_wall", RED, self.left_marker_point_pub)
-        self.publish_wallpoints(self.right_wall, "right_wall", BLUE, self.right_marker_point_pub)
+        if self.log:
+            self.publish_wallpoints(self.left_wall, "left_wall", RED, self.left_marker_point_pub)
+            self.publish_wallpoints(self.right_wall, "right_wall", BLUE, self.right_marker_point_pub)
 
         # get current position
         current_pose = pose_msg.pose.pose
@@ -109,8 +113,8 @@ class CameraNode(Node):
 
         filtered_cones = []
         for _, (side, tstart, tend, distance) in enumerate(sorted_cones):
-            half_angle = math.atan2((self.cone_diameter / 2.0), distance)
-            sixth_angle = math.atan2((self.cone_diameter / 6.0), distance)
+            half_angle = np.arctan2((self.cone_diameter / 2.0), distance)
+            sixth_angle = np.arctan2((self.cone_diameter / 6.0), distance)
             if tstart + half_angle < tend:
                 filtered_cones.append((side, tstart + sixth_angle, tend - sixth_angle))
 
@@ -125,7 +129,6 @@ class CameraNode(Node):
 
         # Publish the left wall
         self.left_wall_publisher.publish(leftWallArray)
-        self.last_left_wallranges_len = self.publish_wallranges(leftWallArray.data, self.last_left_wallranges_len, "left_ranges", RED, self.left_marker_range_pub)
         
         rightWallArray = Float64MultiArray()
         rightWallArray.data = []
@@ -134,15 +137,13 @@ class CameraNode(Node):
 
         # Publish the right wall
         self.right_wall_publisher.publish(rightWallArray)
-        self.last_right_wallranges_len = self.publish_wallranges(rightWallArray.data, self.last_right_wallranges_len, "right_ranges", BLUE, self.right_marker_range_pub)
 
-        # Publish border
-        self.publish_wallranges([0.610865, -0.610865], 2, "border", GREEN, self.border_pub)
+        if self.log:
+            self.last_left_wallranges_len = self.publish_wallranges(leftWallArray.data, self.last_left_wallranges_len, "left_ranges", RED, self.left_marker_range_pub)
+            self.last_right_wallranges_len = self.publish_wallranges(rightWallArray.data, self.last_right_wallranges_len, "right_ranges", BLUE, self.right_marker_range_pub)
+            self.publish_wallranges([0.610865, -0.610865], 2, "border", GREEN, self.border_pub)
 
     def cones_in_fov(self, waypoints: List[Point]) -> List[Tuple]:
-        fov_radians = math.radians(self.fov)
-        half_fov = fov_radians / 2.0
-
         cones_in_view_ranges = []
         for point in waypoints:
             # Compute vector from us to point
@@ -151,33 +152,39 @@ class CameraNode(Node):
             if dx == 0 and dy == 0:
                 continue
 
-            point_angle = math.atan2(dy, dx)
+            point_angle = np.arctan2(dy, dx)
             angle_diff = point_angle - self.yaw
-            angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
+            angle_diff = (angle_diff + np.pi) % (2 * np.pi) - np.pi
 
-            distance = math.sqrt(dx**2 + dy**2)
+            distance = np.sqrt(dx**2 + dy**2)
             if distance == 0:
                 continue
 
             # Calculate angular size of cone
-            half_angle = math.atan2((self.cone_diameter / 2.0), distance)
+            half_angle = np.arctan2((self.cone_diameter / 2.0), distance)
             theta_start = angle_diff - half_angle
             theta_end = angle_diff + half_angle
 
             # normalize angles 
-            theta_start = (theta_start + math.pi) % (2 * math.pi) - math.pi
-            theta_end = (theta_end + math.pi) % (2 * math.pi) - math.pi
+            theta_start = (theta_start + np.pi) % (2 * np.pi) - np.pi
+            theta_end = (theta_end + np.pi) % (2 * np.pi) - np.pi
 
-            if theta_end >= -half_fov and theta_start <= half_fov:
+            if theta_end >= -self.half_fov and theta_start <= self.half_fov:
                 cones_in_view_ranges.append((theta_start, theta_end, distance))
 
         return cones_in_view_ranges
 
     def get_yaw_from_pose(self, pose: Pose) -> float:
-        orientation = pose.orientation
-        siny_cosp = 2 * (orientation.w * orientation.z + orientation.x * orientation.y)
-        cosy_cosp = 1 - 2 * (orientation.y**2 + orientation.z**2)
-        return np.arctan2(siny_cosp, cosy_cosp)
+        q = pose.orientation
+        qy2 = q.y * q.y
+        qz2 = q.z * q.z
+        qwqz = q.w * q.z
+        qxqy = q.x * q.y
+
+        siny_cosp = 2.0 * (qwqz + qxqy)
+        cosy_cosp = 1.0 - 2.0 * (qy2 + qz2)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+        return yaw
 
     def load_wallpoints(self):
         try:
@@ -240,8 +247,8 @@ class CameraNode(Node):
 
         # Set arrow length
         arrow_length = 10.0
-        end_x = self.x + arrow_length * math.cos(angle)
-        end_y = self.y + arrow_length * math.sin(angle)
+        end_x = self.x + arrow_length * np.cos(angle)
+        end_y = self.y + arrow_length * np.sin(angle)
         marker.points.append(Point(x=end_x, y=end_y, z=0.0))
 
         # Set the marker size and color

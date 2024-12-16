@@ -21,7 +21,7 @@ class PurePursuit(Node):
         drive_topic = '/drive'
         odom_topic = '/ego_racecar/odom'
 
-        self.lookahead_distance = 0.25  # arbitrary parameter value
+        self.lookahead_distance = 0.1  # arbitrary parameter value
         self.waypoints = []  # Initialize an empty list for waypoints
 
         # Subscribe to the /waypoints topic (assuming waypoints are published as a PoseArray)
@@ -57,6 +57,7 @@ class PurePursuit(Node):
     def pose_callback(self, pose_msg: Odometry):
         """Callback to update car's pose and execute pure pursuit."""
         if len(self.waypoints) == 0:
+            self.get_logger().info(f"no waypoints")
             return
 
         # Extract position from the message
@@ -140,7 +141,7 @@ class PurePursuit(Node):
         """Publish the drive command with the calculated steering angle."""        
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.steering_angle = steering_angle
-        drive_msg.drive.speed = 0.5  # Set speed as needed
+        drive_msg.drive.speed = 1.0  # Set speed as needed
         self.drive_pub.publish(drive_msg)
         # self.get_logger().info(f"Steering Angle: {steering_angle}")   
 
