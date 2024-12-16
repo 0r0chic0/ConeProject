@@ -19,6 +19,12 @@ def generate_launch_description():
         # ),
         Node(
             package='cone_detection',
+            executable='process_node',
+            name='process_node',
+            parameters=[config]
+        ),
+        Node(
+            package='cone_detection',
             executable='camera_node',
             name='camera_node',
             parameters=[config]

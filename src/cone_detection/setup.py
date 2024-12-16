@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'pure_pursuit_node = cone_detection.pure_pursuit_node:main',
             'camera_node = cone_detection.camera_node:main',
+            'process_node = cone_detection.process_node:main',
             'waypoint_node = cone_detection.waypoint_node:main',
         ],
     },

@@ -28,10 +28,10 @@ class CameraNode(Node):
         right_marker_range_topic = "/right_wall_marker_ranges"
 
         # Parameters
-        self.fov = 70 # in degrees
         self.car_length = 0.35 # in meters
         self.car_width = 0.20 # in meters
-        self.cone_diameter = 0.25 # in meters
+        self.fov = 70 # in degrees
+        self.cone_diameter = 0.3 # in meters
         self.frame_id = "map"
 
         # Current location
@@ -68,7 +68,7 @@ class CameraNode(Node):
 
         # get current position
         current_pose = pose_msg.pose.pose
-        self.x = current_pose.position.x
+        self.x = current_pose.position.x + self.car_length / 2
         self.y = current_pose.position.y
         self.yaw = self.get_yaw_from_pose(current_pose)
 
@@ -79,28 +79,38 @@ class CameraNode(Node):
         # Tag them to know which side they belong to
         cones = [("L", *c) for c in left_cones] + [("R", *c) for c in right_cones]
 
-        # Remove overlaps between left and right sets
-        indices_to_remove = set()
-        for i in range(len(cones)):
-            if i in indices_to_remove:
-                continue
-            for j in range(i+1, len(cones)):
-                if j in indices_to_remove:
+        # Remove overlaps between cones
+        sorted_cones = sorted(cones, key=lambda x: x[3], reverse=True)
+        for i in range(len(sorted_cones)):
+            for j in range(i+1, len(sorted_cones)):
+                further = sorted_cones[i]
+                closer = sorted_cones[j]
+
+                # no overlap
+                if closer[1] > further[2] or closer[2] < further[1]:
                     continue
 
-                _, t1_start, t1_end, d1 = cones[i]
-                _, t2_start, t2_end, d2 = cones[j]
+                # find valid segments
+                valid_segments = [(0,0)]
+                if further[1] > closer[1]:
+                    valid_segments.append((further[1], closer[1]))
+                if closer[2] < further[2]:
+                    valid_segments.append((closer[2], further[2]))
 
-                # Check for overlap
-                if not (t1_end < t2_start or t2_end < t1_start):
-                    if d1 > d2:
-                        indices_to_remove.add(i)
-                    else:
-                        indices_to_remove.add(j)
+                best_segment_idx = np.argmax([s[1] - s[0] for s in valid_segments])
+                best_segment = valid_segments[best_segment_idx]
+
+                sorted_cones[i] = (
+                    further[0],
+                    best_segment[0],
+                    best_segment[1],
+                    further[3]
+                )    
 
         filtered_cones = []
-        for idx, (side, tstart, tend, _) in enumerate(cones):
-            if idx not in indices_to_remove:
+        for _, (side, tstart, tend, distance) in enumerate(sorted_cones):
+            half_angle = math.atan2((self.cone_diameter / 2.0), distance)
+            if tstart + half_angle < tend:
                 filtered_cones.append((side, tstart, tend))
 
         # Separate back into left and right
@@ -134,31 +144,30 @@ class CameraNode(Node):
 
         cones_in_view_ranges = []
         for point in waypoints:
-            # Compute vector from robot to point
+            # Compute vector from us to point
             dx = point.x - self.x
             dy = point.y - self.y
             if dx == 0 and dy == 0:
                 continue
 
-            # find angle from point
             point_angle = math.atan2(dy, dx)
             angle_diff = point_angle - self.yaw
             angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
 
-            # Check angle difference is in fov
-            if -half_fov <= angle_diff <= half_fov:
-                distance = math.sqrt(dx**2 + dy**2)
-                if distance == 0:
-                    continue
+            distance = math.sqrt(dx**2 + dy**2)
+            if distance == 0:
+                continue
 
-                # Half-angle that the cone subtends
-                half_angle = math.atan2((self.cone_diameter / 2.0), distance)
+            # Calculate angular size of cone
+            half_angle = math.atan2((self.cone_diameter / 2.0), distance)
+            theta_start = angle_diff - half_angle
+            theta_end = angle_diff + half_angle
 
-                theta_start = angle_diff - half_angle
-                theta_end = angle_diff + half_angle
-                theta_start = (theta_start + math.pi) % (2 * math.pi) - math.pi
-                theta_end = (theta_end + math.pi) % (2 * math.pi) - math.pi
+            # normalize angles 
+            theta_start = (theta_start + math.pi) % (2 * math.pi) - math.pi
+            theta_end = (theta_end + math.pi) % (2 * math.pi) - math.pi
 
+            if theta_end >= -half_fov and theta_start <= half_fov:
                 cones_in_view_ranges.append((theta_start, theta_end, distance))
 
         return cones_in_view_ranges
@@ -235,7 +244,7 @@ class CameraNode(Node):
         marker.points.append(Point(x=end_x, y=end_y, z=0.0))
 
         # Set the marker size and color
-        marker.scale.x = 0.05
+        marker.scale.x = 0.025
         marker.scale.y = 0.1
         marker.scale.z = 0.1
         marker.color = color
@@ -279,10 +288,8 @@ class CameraNode(Node):
        
 def main(args=None):
     rclpy.init(args=args)
-    print("Camera Node Initialized")
     camera_node = CameraNode()
     rclpy.spin(camera_node)
-
     camera_node.destroy_node()
     rclpy.shutdown()
 
