@@ -31,7 +31,7 @@ class CameraNode(Node):
         self.car_length = 0.35 # in meters
         self.car_width = 0.20 # in meters
         self.fov = 70 # in degrees
-        self.cone_diameter = 0.3 # in meters
+        self.cone_diameter = 0.30 # in meters
         self.frame_id = "map"
 
         # Current location
@@ -68,7 +68,7 @@ class CameraNode(Node):
 
         # get current position
         current_pose = pose_msg.pose.pose
-        self.x = current_pose.position.x + self.car_length / 2
+        self.x = current_pose.position.x
         self.y = current_pose.position.y
         self.yaw = self.get_yaw_from_pose(current_pose)
 
@@ -110,8 +110,9 @@ class CameraNode(Node):
         filtered_cones = []
         for _, (side, tstart, tend, distance) in enumerate(sorted_cones):
             half_angle = math.atan2((self.cone_diameter / 2.0), distance)
+            sixth_angle = math.atan2((self.cone_diameter / 6.0), distance)
             if tstart + half_angle < tend:
-                filtered_cones.append((side, tstart, tend))
+                filtered_cones.append((side, tstart + sixth_angle, tend - sixth_angle))
 
         # Separate back into left and right
         final_left_cones = [(tstart, tend) for (side, tstart, tend) in filtered_cones if side == "L"]

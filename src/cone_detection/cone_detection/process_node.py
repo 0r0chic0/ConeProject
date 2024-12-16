@@ -3,12 +3,16 @@ import math
 from typing import List
 
 import rclpy
-from rclpy.node import Node
+from rclpy.node import Node, Publisher
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Pose, Point, PoseArray
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64MultiArray, ColorRGBA
 from visualization_msgs.msg import MarkerArray, Marker
+
+RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
+GREEN = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+BLUE = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)
 
 class ProcessNode(Node):
     def __init__(self):
@@ -18,6 +22,8 @@ class ProcessNode(Node):
         # Topics
         leftwall_ranges_topic = "/left_wall_ranges"
         rightwall_ranges_topic = "/right_wall_ranges"
+        leftwall_markers_topic = "/left_wall_markers"
+        rightwall_markers_topic = "/right_wall_markers"
         pose_topic = "/ego_racecar/odom"
         waypoints_topic = "/waypoints"
         lidarscan_topic = "/scan"
@@ -40,6 +46,10 @@ class ProcessNode(Node):
         self.waypoint_pub = self.create_publisher(PoseArray, waypoints_topic, 10)
         self.waypoint_viz_pub = self.create_publisher(MarkerArray, waypoint_viz_topic, 10)
         self.last_waypoint_len = 0
+        self.leftwall_markers_pub = self.create_publisher(MarkerArray, leftwall_markers_topic, 10)
+        self.last_leftwall_markers_len = 0
+        self.rightwall_markers_pub = self.create_publisher(MarkerArray, rightwall_markers_topic, 10)
+        self.last_rightwall_markers_len = 0
 
         # Persistant state
         self.left_wall: List[Point] = []
@@ -57,7 +67,7 @@ class ProcessNode(Node):
     def pose_callback(self, pose_msg: Odometry):
         # get current position
         current_pose = pose_msg.pose.pose
-        self.x = current_pose.position.x + self.car_length / 2
+        self.x = current_pose.position.x
         self.y = current_pose.position.y
         self.yaw = self.get_yaw_from_pose(current_pose)
 
@@ -67,13 +77,16 @@ class ProcessNode(Node):
 
     def leftwall_callback(self, wall_msg: Float64MultiArray):
         new_points = self.get_points_from_ranges(wall_msg.data)
-        self.merge_points(self.left_wall, new_points, self.merge_point_threshold)
+        self.left_wall = self.merge_points(self.left_wall, new_points, self.merge_point_threshold)
+        self.last_leftwall_markers_len = self.publish_waypoint_viz(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
+
 
         self.recalculate_midpoints()
 
     def rightwall_callback(self, wall_msg: Float64MultiArray):
         new_points = self.get_points_from_ranges(wall_msg.data)
-        self.merge_points(self.right_wall, new_points, self.merge_point_threshold)
+        self.right_wall = self.merge_points(self.right_wall, new_points, self.merge_point_threshold)
+        self.last_rightwall_markers_len = self.publish_waypoint_viz(self.right_wall, self.last_rightwall_markers_len, "rightwall_markers", BLUE, self.rightwall_markers_pub)
 
         self.recalculate_midpoints()
 
@@ -82,9 +95,16 @@ class ProcessNode(Node):
 
         # For each point in the left wall and each point in the right wall, find the midpoint
         for lp in self.left_wall:
+            if self.dist_from_self(lp) > 7:
+                continue
+
             for rp in self.right_wall:
+                if self.dist_from_self(rp) > 7:
+                    continue
+
                 mx = (lp.x + rp.x) / 2.0
                 my = (lp.y + rp.y) / 2.0
+                
 
                 # Add point at midpoint
                 pose = Pose()
@@ -96,25 +116,27 @@ class ProcessNode(Node):
 
         # Publish to pure pursuit
         self.waypoint_pub.publish(midpoint_poses)
-        self.publish_waypoint_viz([pose.position for pose in midpoint_poses.poses])
+        self.last_waypoint_len = self.publish_waypoint_viz([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
 
-    def merge_points(self, existing_points: List[Point], new_points: List[Point], threshold: float):
-        for new in new_points:
-            merged = False
-            for _, existing in enumerate(existing_points):
-                dx = existing.x - new.x
-                dy = existing.y - new.y
-                dist = math.sqrt(dx*dx + dy*dy)
-                if dist < threshold:
-                    # merge points
-                    existing.x = (existing.x + new.x) / 2.0
-                    existing.y = (existing.y + new.y) / 2.0
-                    merged = True
-                    break
+    def merge_points(self, existing_points: List[Point], new_points: List[Point], threshold: float) -> List[Point]:
+        # for new in new_points:
+        #     merged = False
+        #     for _, existing in enumerate(existing_points):
+        #         dx = existing.x - new.x
+        #         dy = existing.y - new.y
+        #         dist = math.sqrt(dx*dx + dy*dy)
+        #         if dist < threshold:
+        #             # merge points
+        #             existing.x = (existing.x + new.x) / 2.0
+        #             existing.y = (existing.y + new.y) / 2.0
+        #             merged = True
+        #             break
 
-            if not merged:
-                # if no match, add in
-                existing_points.append(new)
+        #     if not merged:
+        #         # if no match, add in
+        #         existing_points.append(new)
+        
+        return new_points
 
     def get_points_from_ranges(self, range_data: List[float]) ->  List[Point]:
         if self.x is None or self.lidar_array is None:
@@ -144,8 +166,9 @@ class ProcessNode(Node):
                 continue
 
             # find average distance, rejecting outliers
-            avg_dist = np.mean(valid_values[abs(valid_values - np.mean(valid_values)) < 2 * np.std(valid_values)])
+            avg_dist = np.mean(valid_values[abs(valid_values - np.mean(valid_values)) < 1 * np.std(valid_values)]) + self.cone_diameter / 2
             theta_mid = (theta_start + theta_end) / 2.0
+            # self.get_logger().info(f"{np.mean(valid_values)}, {np.std(valid_values)} {segment} {avg_dist}")
 
             # get global coords and store
             global_angle = self.yaw + theta_mid
@@ -155,6 +178,11 @@ class ProcessNode(Node):
             points.append(p)
 
         return points
+    
+    def dist_from_self(self, point: Point) -> float:
+        dx = self.x - point.x
+        dy = self.y - point.y
+        return np.sqrt(dx**2 + dy**2)
 
     def get_yaw_from_pose(self, pose: Pose) -> float:
         orientation = pose.orientation
@@ -162,32 +190,31 @@ class ProcessNode(Node):
         cosy_cosp = 1 - 2 * (orientation.y**2 + orientation.z**2)
         return np.arctan2(siny_cosp, cosy_cosp)
     
-    def publish_waypoint_viz(self, waypoints: List[Point]):
+    def publish_waypoint_viz(self, waypoints: List[Point], last_len: int, namespace: str, color: ColorRGBA, publisher: Publisher) -> int:
         waypoint_markers = MarkerArray()
 
         for i, point in enumerate(waypoints):
-            marker = self.point_to_marker(point, i)
+            marker = self.point_to_marker(point, i, namespace, color)
 
             waypoint_markers.markers.append(marker)
 
         # Delete old
         curr_waypoints_len = len(waypoint_markers.markers)
-        if (curr_waypoints_len < self.last_waypoint_len):
-            for i in range(curr_waypoints_len, self.last_waypoint_len):
-                marker = self.remove_marker(i)
+        if (curr_waypoints_len < last_len):
+            for i in range(curr_waypoints_len, last_len):
+                marker = self.remove_marker(i, namespace)
 
                 waypoint_markers.markers.append(marker)
-        self.last_waypoint_len = curr_waypoints_len
-
         # Publish the markers
-        self.waypoint_viz_pub.publish(waypoint_markers)
+        publisher.publish(waypoint_markers)
+        return curr_waypoints_len
     
-    def point_to_marker(self, point: Point, idx: int) -> Marker:
+    def point_to_marker(self, point: Point, idx: int, namespace: str, color: ColorRGBA) -> Marker:
         # Create and publish a marker for this point
         marker = Marker()
         marker.header.frame_id = self.frame_id
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "waypoint_marker"
+        marker.ns = namespace
         marker.id = idx
         marker.type = Marker.SPHERE
         marker.action = Marker.ADD
@@ -200,16 +227,16 @@ class ProcessNode(Node):
         marker.scale.x = 0.1
         marker.scale.y = 0.1
         marker.scale.z = 0.1
-        marker.color = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
+        marker.color = color
 
         return marker
     
-    def remove_marker(self, idx: int) -> Marker:
+    def remove_marker(self, idx: int, namespace: str) -> Marker:
         # Create and publish a marker for this point
         marker = Marker()
         marker.header.frame_id = self.frame_id
         marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = "waypoint_marker"
+        marker.ns = namespace
         marker.id = idx
         marker.type = Marker.SPHERE
         marker.action = Marker.DELETE

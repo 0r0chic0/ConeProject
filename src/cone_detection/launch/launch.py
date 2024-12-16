@@ -11,12 +11,12 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
-        # Node(
-        #     package='cone_detection',
-        #     executable='pure_pursuit_node',
-        #     name='pure_pursuit_node',
-        #     parameters=[config]
-        # ),
+        Node(
+            package='cone_detection',
+            executable='pure_pursuit_node',
+            name='pure_pursuit_node',
+            parameters=[config]
+        ),
         Node(
             package='cone_detection',
             executable='process_node',
