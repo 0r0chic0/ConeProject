@@ -1,17 +1,17 @@
 import numpy as np
-from typing import List
+from typing import List, Tuple
 
+from .rviz_utils import Rviz, RED, BLUE, GREEN
 import rclpy
-from rclpy.node import Node, Publisher
+from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Pose, Point, PoseArray
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64MultiArray, ColorRGBA
-from visualization_msgs.msg import MarkerArray, Marker
+from std_msgs.msg import Float64MultiArray
+from visualization_msgs.msg import MarkerArray
 
-RED = ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
-GREEN = ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0)
-BLUE = ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)
+LEFT = 1.0
+RIGHT = 0.0
 
 class ProcessNode(Node):
     def __init__(self):
@@ -19,8 +19,7 @@ class ProcessNode(Node):
         self.get_logger().info("Process Node Started")
 
         # Topics
-        leftwall_ranges_topic = "/left_wall_ranges"
-        rightwall_ranges_topic = "/right_wall_ranges"
+        wall_ranges_topic = "/wall_ranges"
         leftwall_markers_topic = "/left_wall_markers"
         rightwall_markers_topic = "/right_wall_markers"
         pose_topic = "/ego_racecar/odom"
@@ -37,8 +36,7 @@ class ProcessNode(Node):
         self.log = True
 
         # Subscribers
-        self.create_subscription(Float64MultiArray, leftwall_ranges_topic, self.leftwall_callback, 10) 
-        self.create_subscription(Float64MultiArray, rightwall_ranges_topic, self.rightwall_callback, 10) 
+        self.create_subscription(Float64MultiArray, wall_ranges_topic, self.wall_callback, 10)
         self.create_subscription(LaserScan, lidarscan_topic, self.lidar_callback, 10)
         self.create_subscription(Odometry, pose_topic, self.pose_callback, 10)
 
@@ -67,6 +65,8 @@ class ProcessNode(Node):
             self.rightwall_markers_pub = self.create_publisher(MarkerArray, rightwall_markers_topic, 10)
             self.last_rightwall_markers_len = 0
 
+            self.rviz = Rviz(self.get_clock(), self.frame_id)
+
     def pose_callback(self, pose_msg: Odometry):
         # get current position
         current_pose = pose_msg.pose.pose
@@ -78,21 +78,18 @@ class ProcessNode(Node):
         self.lidar_array = np.array(scan_msg.ranges, dtype=float)
         self.lidar_data = scan_msg
 
-    def leftwall_callback(self, wall_msg: Float64MultiArray):
-        new_points = self.get_points_from_ranges(wall_msg.data)
-        self.left_wall = self.merge_points(self.left_wall, new_points, self.merge_point_threshold)
+    def wall_callback(self, wall_msg: Float64MultiArray):
+        if self.x is None or self.lidar_array is None:
+            return
+        
+        new_left_points, new_right_points = self.get_points_from_ranges(wall_msg.data)
+        
+        self.left_wall = self.merge_points(self.left_wall, new_left_points)
+        self.right_wall = self.merge_points(self.right_wall, new_right_points)
 
         if self.log:
-            self.last_leftwall_markers_len = self.publish_waypoint_viz(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
-
-        self.recalculate_midpoints()
-
-    def rightwall_callback(self, wall_msg: Float64MultiArray):
-        new_points = self.get_points_from_ranges(wall_msg.data)
-        self.right_wall = self.merge_points(self.right_wall, new_points, self.merge_point_threshold)
-
-        if self.log:
-            self.last_rightwall_markers_len = self.publish_waypoint_viz(self.right_wall, self.last_rightwall_markers_len, "rightwall_markers", BLUE, self.rightwall_markers_pub)
+            self.last_leftwall_markers_len = self.rviz.publish_points(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
+            self.last_rightwall_markers_len = self.rviz.publish_points(self.right_wall, self.last_rightwall_markers_len, "leftwall_markers", RED, self.rightwall_markers_pub)
 
         self.recalculate_midpoints()
 
@@ -136,43 +133,23 @@ class ProcessNode(Node):
         self.waypoint_pub.publish(midpoint_poses)
 
         if self.log:
-            self.last_waypoint_len = self.publish_waypoint_viz([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
+            self.last_waypoint_len = self.rviz.publish_points([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
 
-    def merge_points(self, existing_points: List[Point], new_points: List[Point], threshold: float) -> List[Point]:
-        # for new in new_points:
-        #     merged = False
-        #     for _, existing in enumerate(existing_points):
-        #         dx = existing.x - new.x
-        #         dy = existing.y - new.y
-        #         dist = np.sqrt(dx**2 + dy**2)
-        #         if dist < threshold:
-        #             # merge points
-        #             existing.x = (existing.x + new.x) / 2.0
-        #             existing.y = (existing.y + new.y) / 2.0
-        #             merged = True
-        #             break
-
-        #     if not merged:
-        #         # if no match, add in
-        #         existing_points.append(new)
-
+    def merge_points(self, existing_points: List[Point], new_points: List[Point]) -> List[Point]:
         if len(new_points) == 0:
             return existing_points
         
         return new_points
 
-    def get_points_from_ranges(self, range_data: List[float]) ->  List[Point]:
-        if self.x is None or self.lidar_array is None:
-            return []
-
-        # constants
+    def get_points_from_ranges(self, range_data: List[float]) ->  Tuple[List[Point], List[Point]]:
         angle_min = self.lidar_data.angle_min
         total_points = len(self.lidar_array)
         angle_increment = self.lidar_data.angle_increment
 
-        points = []
-        ranges = [(range_data[i], range_data[i + 1]) for i in range(0, len(range_data), 2)]
-        for (theta_start, theta_end) in ranges:
+        left_points = []
+        right_points = []
+        ranges = [(range_data[i], range_data[i + 1], range_data[i + 2]) for i in range(0, len(range_data), 3)]
+        for (theta_start, theta_end, color) in ranges:
             # find angle
             i_start = int((theta_start - angle_min) / angle_increment)
             i_end = int((theta_end - angle_min) / angle_increment)
@@ -200,9 +177,13 @@ class ProcessNode(Node):
             x_g = self.x + avg_dist * np.cos(global_angle)
             y_g = self.y + avg_dist * np.sin(global_angle)
             p = Point(x=x_g, y=y_g, z=0.0)
-            points.append(p)
 
-        return points
+            if color == LEFT:
+                left_points.append(p)
+            else:
+                right_points.append(p)
+
+        return left_points, right_points
     
     def dist_from_self(self, point: Point) -> float:
         dx = self.x - point.x
@@ -214,60 +195,6 @@ class ProcessNode(Node):
         siny_cosp = 2 * (orientation.w * orientation.z + orientation.x * orientation.y)
         cosy_cosp = 1 - 2 * (orientation.y**2 + orientation.z**2)
         return np.arctan2(siny_cosp, cosy_cosp)
-    
-    def publish_waypoint_viz(self, waypoints: List[Point], last_len: int, namespace: str, color: ColorRGBA, publisher: Publisher) -> int:
-        waypoint_markers = MarkerArray()
-
-        for i, point in enumerate(waypoints):
-            marker = self.point_to_marker(point, i, namespace, color)
-
-            waypoint_markers.markers.append(marker)
-
-        # Delete old
-        curr_waypoints_len = len(waypoint_markers.markers)
-        if (curr_waypoints_len < last_len):
-            for i in range(curr_waypoints_len, last_len):
-                marker = self.remove_marker(i, namespace)
-
-                waypoint_markers.markers.append(marker)
-        # Publish the markers
-        publisher.publish(waypoint_markers)
-        return curr_waypoints_len
-    
-    def point_to_marker(self, point: Point, idx: int, namespace: str, color: ColorRGBA) -> Marker:
-        # Create and publish a marker for this point
-        marker = Marker()
-        marker.header.frame_id = self.frame_id
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = namespace
-        marker.id = idx
-        marker.type = Marker.SPHERE
-        marker.action = Marker.ADD
-        marker.pose.position.x = point.x
-        marker.pose.position.y = point.y
-        marker.pose.position.z = point.z
-        marker.pose.orientation.w = 1.0
-
-        # Set the marker size and color
-        marker.scale.x = 0.1
-        marker.scale.y = 0.1
-        marker.scale.z = 0.1
-        marker.color = color
-
-        return marker
-    
-    def remove_marker(self, idx: int, namespace: str) -> Marker:
-        # Create and publish a marker for this point
-        marker = Marker()
-        marker.header.frame_id = self.frame_id
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = namespace
-        marker.id = idx
-        marker.type = Marker.SPHERE
-        marker.action = Marker.DELETE
-
-        return marker
-
        
 def main(args=None):
     rclpy.init(args=args)

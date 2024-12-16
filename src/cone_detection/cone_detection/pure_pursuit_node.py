@@ -21,7 +21,7 @@ class PurePursuit(Node):
         drive_topic = '/drive'
         odom_topic = '/ego_racecar/odom'
 
-        self.lookahead_distance = 0.1  # arbitrary parameter value
+        self.lookahead_distance = 0.25  # arbitrary parameter value
         self.waypoints = []  # Initialize an empty list for waypoints
 
         # Subscribe to the /waypoints topic (assuming waypoints are published as a PoseArray)
