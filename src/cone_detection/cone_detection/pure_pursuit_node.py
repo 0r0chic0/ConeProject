@@ -21,7 +21,7 @@ class PurePursuit(Node):
         drive_topic = '/drive'
         odom_topic = '/ego_racecar/odom'
 
-        self.lookahead_distance = 0.35  # arbitrary parameter value
+        self.lookahead_distance = 0.5  # arbitrary parameter value
         self.waypoints = []  # Initialize an empty list for waypoints
 
         # Subscribe to the /waypoints topic (assuming waypoints are published as a PoseArray)
@@ -121,10 +121,8 @@ class PurePursuit(Node):
         """Calculate the steering angle to the lookahead waypoint."""        
         L = self.lookahead_distance  # Lookahead distance
         y = lookahead_waypoint.y  # Lateral offset to the lookahead point
-    
-        # Check to avoid division by zero
         if y == 0:
-            return 0.0  # Going straight
+            return 0.0
 
         # Calculate the curvature (k)
         curvature = 2 * y / (L ** 2)
@@ -133,16 +131,15 @@ class PurePursuit(Node):
         steering_angle = np.arctan(curvature * L)
 
         # Limit the steering angle within allowable bounds for safety
-        max_steering_angle = 0.4  # Example maximum, adjust as needed
+        max_steering_angle = 0.4
         return np.clip(steering_angle, -max_steering_angle, max_steering_angle)
 
     def publish_drive_command(self, steering_angle):
         """Publish the drive command with the calculated steering angle."""        
         drive_msg = AckermannDriveStamped()
         drive_msg.drive.steering_angle = steering_angle
-        drive_msg.drive.speed = 1.5  # Set speed as needed
+        drive_msg.drive.speed = 1.0
         self.drive_pub.publish(drive_msg)
-        # self.get_logger().info(f"Steering Angle: {steering_angle}")   
 
 def main(args=None):
     rclpy.init(args=args)

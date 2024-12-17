@@ -3,11 +3,11 @@ from typing import List, Tuple
 
 from .rviz_utils import Rviz, RED, BLUE, GREEN
 import rclpy
-from rclpy.node import Node, Publisher
+from rclpy.node import Node
 from geometry_msgs.msg import Pose, Point
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Float64MultiArray, ColorRGBA
+from std_msgs.msg import Float64MultiArray
 
 LEFT = 1.0
 RIGHT = 0.0
@@ -134,9 +134,30 @@ class CameraNode(Node):
         self.wall_publisher.publish(wallArray)
 
         if self.log:
-            self.last_left_wallranges_len = self.rviz.publish_angles((self.x, self.y, self.yaw), [r for cone in final_left_cones for r in cone], self.last_left_wallranges_len, "left_ranges", RED, self.left_marker_range_pub)
-            self.last_right_wallranges_len = self.rviz.publish_angles((self.x, self.y, self.yaw), [r for cone in final_right_cones for r in cone], self.last_right_wallranges_len, "right_ranges", BLUE, self.right_marker_range_pub)
-            self.rviz.publish_angles((self.x, self.y, self.yaw), [0.610865, -0.610865], 2, "border", GREEN, self.border_pub)
+            self.last_left_wallranges_len = self.rviz.publish_angles(
+                (self.x, self.y, self.yaw), 
+                [r for cone in final_left_cones for r in cone], 
+                self.last_left_wallranges_len, 
+                "left_ranges", 
+                RED, 
+                self.left_marker_range_pub
+            )
+            self.last_right_wallranges_len = self.rviz.publish_angles(
+                (self.x, self.y, self.yaw), 
+                [r for cone in final_right_cones for r in cone], 
+                self.last_right_wallranges_len, 
+                "right_ranges", 
+                BLUE, 
+                self.right_marker_range_pub
+            )
+            self.rviz.publish_angles(
+                (self.x, self.y, self.yaw), 
+                [0.610865, -0.610865], # [35deg, -35deg]
+                2, 
+                "border", 
+                GREEN, 
+                self.border_pub
+            )
 
     def cones_in_fov(self, waypoints: List[Point]) -> List[Tuple]:
         cones_in_view_ranges = []
@@ -186,12 +207,12 @@ class CameraNode(Node):
             with open(self.left_wall_path, "r") as file:
                 for line in file.readlines():
                     x, y = [float(val) for val in line.split(',')]
-                    self.left_wall.append(Point(x=x, y=y, z=0.0))
+                    self.left_wall.append(Point(x=x, y=y))
                     
             with open(self.right_wall_path, "r") as file:
                 for line in file.readlines():
                     x, y = [float(val) for val in line.split(',')]
-                    self.right_wall.append(Point(x=x, y=y, z=0.0))
+                    self.right_wall.append(Point(x=x, y=y))
                     
         except FileNotFoundError:
             self.get_logger().warn("Waypoints file not found.")
