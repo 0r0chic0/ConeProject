@@ -69,9 +69,10 @@ class Rviz:
         marker.pose.orientation.w = 1.0
 
         # Set the marker size and color
-        marker.scale.x = 0.1
-        marker.scale.y = 0.1
-        marker.scale.z = 0.1
+        scale = 0.2
+        marker.scale.x = scale
+        marker.scale.y = scale
+        marker.scale.z = scale       
         marker.color = color
 
         return marker

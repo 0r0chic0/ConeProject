@@ -1,3 +1,6 @@
+from dataclasses import dataclass, field
+import os
+import time
 import numpy as np
 from typing import List, Tuple
 
@@ -12,6 +15,13 @@ from visualization_msgs.msg import MarkerArray
 
 LEFT = 1.0
 RIGHT = 0.0
+
+@dataclass
+class Cone:
+    position: Point
+    count: int = 1
+    first_seen: float = field(default_factory=lambda: time.time())
+    last_seen: float = field(default_factory=lambda: time.time())
 
 class ProcessNode(Node):
     def __init__(self):
@@ -31,7 +41,7 @@ class ProcessNode(Node):
         self.car_length = 0.35 # in meters
         self.car_width = 0.20 # in meters
         self.cone_diameter = 0.25 # in meters
-        self.merge_point_threshold = 0.25 # in meters
+        self.merge_point_threshold = 2 * self.cone_diameter # in meters
         self.frame_id = "map"
         self.log = True
 
@@ -44,8 +54,10 @@ class ProcessNode(Node):
         self.waypoint_pub = self.create_publisher(PoseArray, waypoints_topic, 10)
 
         # Persistant state
-        self.left_wall: List[Point] = []
-        self.right_wall: List[Point] = []
+        self.left_wall: List[Cone] = []
+        self.right_wall: List[Cone] = []
+        self.left_wall2: List[Cone] = []
+        self.right_wall2: List[Cone] = []
 
         # Lidar data
         self.lidar_array = None
@@ -83,63 +95,22 @@ class ProcessNode(Node):
             return
         
         new_left_points, new_right_points = self.get_points_from_ranges(wall_msg.data)
+
+        # Old data is better than no data
+        if len(new_left_points) == 0 or len(new_right_points) == 0:
+            return
         
-        self.left_wall = self.merge_points(self.left_wall, new_left_points)
-        self.right_wall = self.merge_points(self.right_wall, new_right_points)
+        self.left_wall = self.merge_points(self.left_wall, new_left_points, [])
+        self.right_wall = self.merge_points(self.right_wall, new_right_points, self.left_wall)
+
+        # self.left_wall = [Cone(position=pt) for pt in new_left_points]
+        # self.right_wall = [Cone(position=pt) for pt in new_right_points]
 
         if self.log:
-            self.last_leftwall_markers_len = self.rviz.publish_points(self.left_wall, self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
-            self.last_rightwall_markers_len = self.rviz.publish_points(self.right_wall, self.last_rightwall_markers_len, "leftwall_markers", RED, self.rightwall_markers_pub)
+            self.last_leftwall_markers_len = self.rviz.publish_points([cone.position for cone in self.left_wall], self.last_leftwall_markers_len, "leftwall_markers", RED, self.leftwall_markers_pub)
+            self.last_rightwall_markers_len = self.rviz.publish_points([cone.position for cone in self.right_wall], self.last_rightwall_markers_len, "rightwall_markers", BLUE, self.rightwall_markers_pub)
 
         self.recalculate_midpoints()
-
-    def recalculate_midpoints(self):
-        midpoint_poses = PoseArray()
-
-        # For each point in the left wall and each point in the right wall, find the midpoint
-        for rp in self.right_wall:
-            if self.dist_from_self(rp) > 6:
-                continue
-
-            # Find closest
-            closest = None
-            closest_dist = np.inf
-            for lp in self.left_wall:
-                if self.dist_from_self(lp) > 6:
-                    continue
-
-                dx = lp.x - rp.x
-                dy = lp.y - rp.y
-                distance = np.sqrt(dx**2 + dy**2)
-                if distance < closest_dist:
-                    closest = lp
-                    closest_dist = distance
-
-            if closest is None:
-                continue
-
-            mx = (rp.x + closest.x) / 2.0
-            my = (rp.y + closest.y) / 2.0
-
-            # Add point at midpoint
-            pose = Pose()
-            pose.position.x = mx
-            pose.position.y = my
-            pose.position.z = 0.0
-            pose.orientation.w = 1.0
-            midpoint_poses.poses.append(pose)
-
-        # Publish to pure pursuit
-        self.waypoint_pub.publish(midpoint_poses)
-
-        if self.log:
-            self.last_waypoint_len = self.rviz.publish_points([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
-
-    def merge_points(self, existing_points: List[Point], new_points: List[Point]) -> List[Point]:
-        if len(new_points) == 0:
-            return existing_points
-        
-        return new_points
 
     def get_points_from_ranges(self, range_data: List[float]) ->  Tuple[List[Point], List[Point]]:
         angle_min = self.lidar_data.angle_min
@@ -169,7 +140,7 @@ class ProcessNode(Node):
             avg_dist = np.mean(valid_values[abs(valid_values - np.mean(valid_values)) < 1 * np.std(valid_values)]) + self.cone_diameter / 2
             theta_mid = (theta_start + theta_end) / 2.0
 
-            if avg_dist > 6:
+            if not np.isfinite(avg_dist) or avg_dist < 0 or avg_dist > 6:
                 continue
 
             # get global coords and store
@@ -185,23 +156,110 @@ class ProcessNode(Node):
 
         return left_points, right_points
     
-    def dist_from_self(self, point: Point) -> float:
-        dx = self.x - point.x
-        dy = self.y - point.y
-        return np.sqrt(dx**2 + dy**2)
+    def merge_points(self, existing_cones: List[Cone], new_points: List[Point], overriding_cones: List[Cone]) -> List[Point]:
+        for new_pt in new_points:
+            overridden = False
+            for cone in overriding_cones:
+                distance = self.euclidean_distance(new_pt, cone.position)
+                if distance < self.merge_point_threshold:
+                    overridden = True
+                    break
+            if overridden:
+                continue
 
-    def get_yaw_from_pose(self, pose: Pose) -> float:
+            matched = False
+            for cone in existing_cones:
+                distance = self.euclidean_distance(new_pt, cone.position)
+                if distance < self.merge_point_threshold:
+                    # Update the cone's position
+                    cone.position.x = (cone.position.x * cone.count + new_pt.x) / (cone.count + 1)
+                    cone.position.y = (cone.position.y * cone.count + new_pt.y) / (cone.count + 1)
+                    cone.count += 1
+                    cone.last_seen = time.time()
+                    matched = True
+                    break
+            if not matched:
+                # Add as a new cone
+                existing_cones.append(Cone(position=new_pt))
+        
+        # Prune cones that don't meet the detection count or are outdated
+        current_time = time.time()
+        pruned_cones = []
+        for cone in existing_cones:
+            age = current_time - cone.last_seen
+            if cone.count >= 50 or age <= 0.1:
+                pruned_cones.append(cone)
+            else:
+                self.get_logger().debug(f"Pruned cone at ({cone.position.x}, {cone.position.y}) with count {cone.count} and age {age:.2f}s")
+        return pruned_cones
+
+    def recalculate_midpoints(self):
+        midpoint_poses = PoseArray()
+
+        # For each point in the left wall and each point in the right wall, find the midpoint
+        for right_cone in self.right_wall:
+            # Find closest
+            closest = None
+            closest_dist = np.inf
+            for left_cone in self.left_wall:
+                dx = left_cone.position.x - right_cone.position.x
+                dy = left_cone.position.y - right_cone.position.y
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance < closest_dist:
+                    closest = left_cone
+                    closest_dist = distance
+
+            if closest is None:
+                continue
+
+            # Add point at midpoint to closest
+            mx = (right_cone.position.x + closest.position.x) / 2.0
+            my = (right_cone.position.y + closest.position.y) / 2.0
+
+            pose = Pose()
+            pose.position.x = mx
+            pose.position.y = my
+            pose.position.z = 0.0
+            pose.orientation.w = 1.0
+            midpoint_poses.poses.append(pose)
+
+        # Publish to pure pursuit
+        self.waypoint_pub.publish(midpoint_poses)
+
+        if self.log:
+            self.last_waypoint_len = self.rviz.publish_points([pose.position for pose in midpoint_poses.poses], self.last_waypoint_len, "waypoint_markers", GREEN, self.waypoint_viz_pub)
+    
+    def dist_from_self(self, point: Point) -> float:
+        return self.euclidean_distance(Point(x=self.x, y=self.y), point)
+
+    @staticmethod
+    def euclidean_distance(p1: Point, p2: Point) -> float:
+        return np.sqrt((p1.x - p2.x)**2 + (p1.y - p2.y)**2)
+    
+    @staticmethod
+    def get_yaw_from_pose(pose: Pose) -> float:
         orientation = pose.orientation
         siny_cosp = 2 * (orientation.w * orientation.z + orientation.x * orientation.y)
         cosy_cosp = 1 - 2 * (orientation.y**2 + orientation.z**2)
         return np.arctan2(siny_cosp, cosy_cosp)
        
 def main(args=None):
-    rclpy.init(args=args)
-    process_node = ProcessNode()
-    rclpy.spin(process_node)
-    process_node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.init(args=args)
+        process_node = ProcessNode()
+        rclpy.spin(process_node)
+        process_node.destroy_node()
+        rclpy.shutdown()
+    except KeyboardInterrupt:
+        path = os.path.realpath(os.path.join('src', 'cone_detection', 'config', 'cones.csv'))
+
+        # Write to csv
+        with open(path, "w") as file:
+            file.write(f'x,y,count,since_first,since_last,type\n')
+            for cone in process_node.right_wall:
+                file.write(f'{cone.position.x},{cone.position.y},{cone.count},{time.time() - cone.first_seen},{time.time() - cone.last_seen},right,\n')
+            for cone in process_node.left_wall:
+                file.write(f'{cone.position.x},{cone.position.y},{cone.count},{time.time() - cone.first_seen},{time.time() - cone.last_seen},left,\n')
 
 
 if __name__ == "__main__":
