@@ -6,13 +6,13 @@ from utils.general import non_max_suppression
 from utils.torch_utils import select_device
 from models.common import DetectMultiBackend
 
-# Redirect PosixPath to WindowsPath (model was trained on Google Colab which uses Linux )
+# Redirect PosixPath to WindowsPath
 import pathlib
 temp = pathlib.PosixPath
 pathlib.PosixPath = pathlib.WindowsPath
 
 class ConeDetectionYOLOv5:
-    def __init__(self, weights='best.pt', device='cpu', img_size=640, conf_thres=0.65, iou_thres=0.55):
+    def __init__(self, weights='best.pt', device='cpu', img_size=640, conf_thres=0.70, iou_thres=0.30):
         # Initialize YOLOv5 model
         self.device = select_device(device)
         self.model = DetectMultiBackend(weights, device=self.device, dnn=False)
@@ -55,9 +55,11 @@ class ConeDetectionYOLOv5:
                 for *xyxy, conf, cls in reversed(det):
                     x1, y1, x2, y2 = map(int, xyxy)
 
-                    # Check if ROI coordinates are valid
-                    if x1 < 0 or y1 < 0 or x2 > frame.shape[1] or y2 > frame.shape[0]:
-                        continue
+                    # Ensure ROI coordinates are within bounds
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(frame.shape[1] - 1, x2)
+                    y2 = min(frame.shape[0] - 1, y2)
 
                     # Extract region of interest (ROI)
                     roi = frame[y1:y2, x1:x2]
@@ -94,6 +96,9 @@ class ConeDetectionYOLOv5:
                     else:
                         color = "Unknown"
 
+                    # Adjust bounding box for tight fit
+                    x1, y1, x2, y2 = map(int, [x1 + 2, y1 + 2, x2 - 2, y2 - 2])
+
                     # Draw bounding box and label
                     label = f'{color} {conf:.2f}'
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -115,7 +120,7 @@ class ConeDetectionYOLOv5:
 
             # Print detected cones
             for cone in detected_cones:
-                print(f"Detected: {cone[0]} ")
+                print(f"Detected: {cone[0]} with confidence {cone[1]:.2f}")
 
             # Display the video stream with detections
             cv2.imshow("Cone Detection", frame)
@@ -135,7 +140,3 @@ if __name__ == "__main__":
     weights_path = r'src/cone_detection/cone_detection/best.pt'
     cone_detection = ConeDetectionYOLOv5(weights=weights_path, device='cpu')
     cone_detection.run()
-
-   
-
-    
