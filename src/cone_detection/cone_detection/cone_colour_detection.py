@@ -132,7 +132,7 @@ class ConeDetectionYOLOv5:
         pathlib.PosixPath = temp
 
 if __name__ == "__main__":
-    weights_path = r'path/to/model'
+    weights_path = r'src/cone_detection/cone_detection/best.pt'
     cone_detection = ConeDetectionYOLOv5(weights=weights_path, device='cpu')
     cone_detection.run()
 
