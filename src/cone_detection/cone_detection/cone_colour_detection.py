@@ -12,7 +12,7 @@ temp = pathlib.PosixPath
 pathlib.PosixPath = pathlib.WindowsPath
 
 class ConeDetectionYOLOv5:
-    def __init__(self, weights='best.pt', device='cpu', img_size=640, conf_thres=0.70, iou_thres=0.30):
+    def __init__(self, weights='best.pt', device='cpu', img_size=640, conf_thres=0.70, iou_thres=0.30, hfov=90, vfov=60):
         # Initialize YOLOv5 model
         self.device = select_device(device)
         self.model = DetectMultiBackend(weights, device=self.device, dnn=False)
@@ -21,6 +21,10 @@ class ConeDetectionYOLOv5:
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.names = self.model.names  # Class names
+
+        # Camera field of view (in degrees)
+        self.hfov = hfov
+        self.vfov = vfov
 
         # OpenCV video capture (using default webcam)
         self.cap = cv2.VideoCapture(0)  # 0 refers to the default webcam
@@ -50,6 +54,8 @@ class ConeDetectionYOLOv5:
         pred = non_max_suppression(pred, self.conf_thres, self.iou_thres, classes=None, agnostic=False)
 
         detected_cones = []
+        frame_height, frame_width = frame.shape[:2]
+
         for det in pred:
             if len(det):
                 for *xyxy, conf, cls in reversed(det):
@@ -99,12 +105,30 @@ class ConeDetectionYOLOv5:
                     # Adjust bounding box for tight fit
                     x1, y1, x2, y2 = map(int, [x1 + 2, y1 + 2, x2 - 2, y2 - 2])
 
-                    # Draw bounding box and label
+                    # Calculate the center of the bounding box
+                    box_center_x = (x1 + x2) / 2
+                    box_center_y = (y1 + y2) / 2
+
+                    # Normalize to [-1, 1]
+                    norm_x = (box_center_x / frame_width) * 2 - 1
+                    norm_y = (box_center_y / frame_height) * 2 - 1
+
+                    # Calculate angular position
+                    angle_x = norm_x * (self.hfov / 2)
+                    angle_y = -norm_y * (self.vfov / 2)  # Negative because image y-coordinates increase downward
+
+                    # Calculate horizontal and vertical spans
+                    horizontal_span = (x1, x2)
+                    vertical_span = (y1, y2)
+
+                    # Draw bounding box, label, and angular position
                     label = f'{color} {conf:.2f}'
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    cv2.putText(frame, f"({angle_x:.1f}, {angle_y:.1f})°", (int(box_center_x), int(box_center_y)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-                    detected_cones.append((color, conf, (x1, y1, x2, y2)))
+                    detected_cones.append((color, conf, (horizontal_span, vertical_span), (angle_x, angle_y)))
 
         return detected_cones
 
@@ -120,7 +144,7 @@ class ConeDetectionYOLOv5:
 
             # Print detected cones
             for cone in detected_cones:
-                print(f"Detected: {cone[0]} with confidence {cone[1]:.2f}")
+                print(f"Detected: {cone[0]} with confidence {cone[1]:.2f}, span {cone[2]}, angular position {cone[3]}°")
 
             # Display the video stream with detections
             cv2.imshow("Cone Detection", frame)
@@ -138,5 +162,6 @@ class ConeDetectionYOLOv5:
 
 if __name__ == "__main__":
     weights_path = r'src/cone_detection/cone_detection/best.pt'
-    cone_detection = ConeDetectionYOLOv5(weights=weights_path, device='cpu')
+    cone_detection = ConeDetectionYOLOv5(weights=weights_path, device='cpu', hfov=90, vfov=60)
     cone_detection.run()
+
