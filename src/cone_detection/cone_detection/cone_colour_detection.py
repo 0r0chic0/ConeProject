@@ -102,10 +102,7 @@ class ConeDetectionYOLOv5:
                     else:
                         color = "Unknown"
 
-                    # Adjust bounding box for tight fit
-                    x1, y1, x2, y2 = map(int, [x1 + 2, y1 + 2, x2 - 2, y2 - 2])
-
-                    # Calculate the center of the bounding box
+                    # Calculate center coordinates
                     box_center_x = (x1 + x2) / 2
                     box_center_y = (y1 + y2) / 2
 
@@ -113,22 +110,36 @@ class ConeDetectionYOLOv5:
                     norm_x = (box_center_x / frame_width) * 2 - 1
                     norm_y = (box_center_y / frame_height) * 2 - 1
 
-                    # Calculate angular position
-                    angle_x = norm_x * (self.hfov / 2)
-                    angle_y = -norm_y * (self.vfov / 2)  # Negative because image y-coordinates increase downward
+                    # Calculate angular position of the center
+                    angle_x_center = norm_x * (self.hfov / 2)
+                    angle_y_center = -norm_y * (self.vfov / 2)  # Negative because image y-coordinates increase downward
 
-                    # Calculate horizontal and vertical spans
-                    horizontal_span = (x1, x2)
-                    vertical_span = (y1, y2)
+                    # Calculate angular spans
+                    norm_x1 = (x1 / frame_width) * 2 - 1
+                    norm_x2 = (x2 / frame_width) * 2 - 1
+                    norm_y1 = (y1 / frame_height) * 2 - 1
+                    norm_y2 = (y2 / frame_height) * 2 - 1
 
-                    # Draw bounding box, label, and angular position
+                    angle_x1 = norm_x1 * (self.hfov / 2)
+                    angle_x2 = norm_x2 * (self.hfov / 2)
+                    angle_y1 = -norm_y1 * (self.vfov / 2)
+                    angle_y2 = -norm_y2 * (self.vfov / 2)
+
+                    horizontal_span = (angle_x1, angle_x2)
+                    vertical_span = (angle_y1, angle_y2)
+
+                    # Draw bounding box, label, angular position, and spans
                     label = f'{color} {conf:.2f}'
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                    cv2.putText(frame, f"({angle_x:.1f}, {angle_y:.1f})°", (int(box_center_x), int(box_center_y)),
+                    cv2.putText(frame, f"Center: ({angle_x_center:.1f}, {angle_y_center:.1f})°", 
+                                (int(box_center_x), int(box_center_y)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    cv2.putText(frame, f"H: {horizontal_span}° V: {vertical_span}°", 
+                                (x1, y2 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-                    detected_cones.append((color, conf, (horizontal_span, vertical_span), (angle_x, angle_y)))
+                    detected_cones.append((color, conf, (horizontal_span, vertical_span), 
+                                           (angle_x_center, angle_y_center)))
 
         return detected_cones
 
@@ -144,7 +155,8 @@ class ConeDetectionYOLOv5:
 
             # Print detected cones
             for cone in detected_cones:
-                print(f"Detected: {cone[0]} with confidence {cone[1]:.2f}, span {cone[2]}, angular position {cone[3]}°")
+                print(f"Detected: {cone[0]} with confidence {cone[1]:.2f}, horizontal span: {cone[2][0]}, "
+                      f"vertical span: {cone[2][1]}, center: {cone[3]}°")
 
             # Display the video stream with detections
             cv2.imshow("Cone Detection", frame)
@@ -164,4 +176,6 @@ if __name__ == "__main__":
     weights_path = r'src/cone_detection/cone_detection/best.pt'
     cone_detection = ConeDetectionYOLOv5(weights=weights_path, device='cpu', hfov=90, vfov=60)
     cone_detection.run()
+
+
 
